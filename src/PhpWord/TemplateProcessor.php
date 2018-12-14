@@ -62,6 +62,9 @@ class TemplateProcessor
      */
     protected $tempDocumentFooters = array();
 
+    protected $_rels;
+    protected $_types;
+
     /**
      * @since 0.12.0 Throws CreateTemporaryFileException and CopyFileException instead of Exception
      *
@@ -101,6 +104,7 @@ class TemplateProcessor
             $index++;
         }
         $this->tempDocumentMainPart = $this->fixBrokenMacros($this->zipClass->getFromName($this->getMainPartName()));
+        $this->_countRels=100;
     }
 
     /**
@@ -194,9 +198,8 @@ class TemplateProcessor
     protected static function ensureUtf8Encoded($subject)
     {
         if (!Text::isUTF8($subject)) {
-            $subject = utf8_encode($subject);
+           $subject = utf8_encode($subject);
         }
-
         return $subject;
     }
 
@@ -217,10 +220,10 @@ class TemplateProcessor
 
         if (is_array($replace)) {
             foreach ($replace as &$item) {
-                $item = static::ensureUtf8Encoded($item);
+                $item = self::ensureUtf8Encoded($item);
             }
         } else {
-            $replace = static::ensureUtf8Encoded($replace);
+            $replace = self::ensureUtf8Encoded($replace);
         }
 
         if (Settings::isOutputEscapingEnabled()) {
@@ -234,39 +237,23 @@ class TemplateProcessor
     }
 
     /**
-     * Returns count of all variables in template.
-     *
-     * @return array
-     */
-    public function getVariableCount()
-    {
-        $variables = $this->getVariablesForPart($this->tempDocumentMainPart);
-
-        foreach ($this->tempDocumentHeaders as $headerXML) {
-            $variables = array_merge(
-                $variables,
-                $this->getVariablesForPart($headerXML)
-            );
-        }
-
-        foreach ($this->tempDocumentFooters as $footerXML) {
-            $variables = array_merge(
-                $variables,
-                $this->getVariablesForPart($footerXML)
-            );
-        }
-
-        return array_count_values($variables);
-    }
-
-    /**
      * Returns array of all variables in template.
      *
      * @return string[]
      */
     public function getVariables()
     {
-        return array_keys($this->getVariableCount());
+        $variables = $this->getVariablesForPart($this->tempDocumentMainPart);
+
+        foreach ($this->tempDocumentHeaders as $headerXML) {
+            $variables = array_merge($variables, $this->getVariablesForPart($headerXML));
+        }
+
+        foreach ($this->tempDocumentFooters as $footerXML) {
+            $variables = array_merge($variables, $this->getVariablesForPart($footerXML));
+        }
+
+        return array_unique($variables);
     }
 
     /**
@@ -339,7 +326,7 @@ class TemplateProcessor
     {
         $xmlBlock = null;
         preg_match(
-            '/(<\?xml.*)(<w:p\b.*>\${' . $blockname . '}<\/w:.*?p>)(.*)(<w:p\b.*\${\/' . $blockname . '}<\/w:.*?p>)/is',
+            '/(<\?xml.*)(<w:p.*>\${' . $blockname . '}<\/w:.*?p>)(.*)(<w:p.*\${\/' . $blockname . '}<\/w:.*?p>)/is',
             $this->tempDocumentMainPart,
             $matches
         );
@@ -371,19 +358,120 @@ class TemplateProcessor
      */
     public function replaceBlock($blockname, $replacement)
     {
-        preg_match(
-            '/(<\?xml.*)(<w:p.*>\${' . $blockname . '}<\/w:.*?p>)(.*)(<w:p.*\${\/' . $blockname . '}<\/w:.*?p>)/is',
-            $this->tempDocumentMainPart,
-            $matches
-        );
+      $matches = $this->findBlock($blockname);
 
-        if (isset($matches[3])) {
-            $this->tempDocumentMainPart = str_replace(
-                $matches[2] . $matches[3] . $matches[4],
-                $replacement,
-                $this->tempDocumentMainPart
-            );
+        if (isset($matches[1]))
+        {
+            $this->tempDocumentMainPart = str_replace
+                (
+                    $matches[0],
+                    $replacement,
+                    $this->tempDocumentMainPart
+                );
         }
+    }
+
+    private function findBlock($blockname)
+    {
+    	// Parse the XML
+    	$xml = new \SimpleXMLElement($this->tempDocumentMainPart);
+
+    	// Find the starting and ending tags
+    	$startNode = false; $endNode = false;
+    	foreach ($xml->xpath('//w:t') as $node)
+    	{
+    		if (strpos($node, '${'.$blockname.'}') !== false)
+    		{
+    			$startNode = $node;
+    			continue;
+    		}
+
+    		if (strpos($node, '${/'.$blockname.'}') !== false)
+    		{
+    			$endNode = $node;
+    			break;
+    		}
+    	}
+
+    	// Make sure we found the tags
+    	if ($startNode === false || $endNode === false)
+    	{
+    		return null;
+    	}
+
+    	// Find the parent <w:p> node for the start tag
+    	$node = $startNode; $startNode = null;
+    	while (is_null($startNode))
+    	{
+    		$node = $node->xpath('..')[0];
+
+    		if ($node->getName() == 'p')
+    		{
+    			$startNode = $node;
+    		}
+    	}
+
+    	// Find the parent <w:p> node for the end tag
+    	$node = $endNode; $endNode = null;
+    	while (is_null($endNode))
+    	{
+    		$node = $node->xpath('..')[0];
+
+    		if ($node->getName() == 'p')
+    		{
+    			$endNode = $node;
+    		}
+    	}
+
+    	/*
+    	 * NOTE: Because SimpleXML reduces empty tags to "self-closing" tags.
+    	 * We need to replace the original XML with the version of XML as
+    	 * SimpleXML sees it. The following example should show the issue
+    	 * we are facing.
+    	 *
+    	 * This is the XML that my document contained orginally.
+    	 *
+    	 * ```xml
+    	 *  <w:p>
+    	 *      <w:pPr>
+    	 *          <w:pStyle w:val="TextBody"/>
+    	 *          <w:rPr></w:rPr>
+    	 *      </w:pPr>
+    	 *      <w:r>
+    	 *          <w:rPr></w:rPr>
+    	 *          <w:t>${CLONEME}</w:t>
+    	 *      </w:r>
+    	 *  </w:p>
+    	 * ```
+    	 *
+    	 * This is the XML that SimpleXML returns from asXml().
+    	 *
+    	 * ```xml
+    	 *  <w:p>
+    	 *      <w:pPr>
+    	 *          <w:pStyle w:val="TextBody"/>
+    	 *          <w:rPr/>
+    	 *      </w:pPr>
+    	 *      <w:r>
+    	 *          <w:rPr/>
+    	 *          <w:t>${CLONEME}</w:t>
+    	 *      </w:r>
+    	 *  </w:p>
+    	 * ```
+    	 */
+
+    	$this->tempDocumentMainPart = $xml->asXml();
+
+    	// Find the xml in between the tags
+    	$xmlBlock = null;
+    	preg_match
+    	(
+    			'/'.preg_quote($startNode->asXml(), '/').'(.*?)'.preg_quote($endNode->asXml(), '/').'/is',
+    			$this->tempDocumentMainPart,
+    			$matches
+    			);
+
+    	return $matches;
     }
 
     /**
@@ -410,6 +498,12 @@ class TemplateProcessor
         }
 
         $this->zipClass->addFromString($this->getMainPartName(), $this->tempDocumentMainPart);
+        if($this->_rels!=""){
+            $this->zipClass->addFromString('word/_rels/document.xml.rels', $this->_rels);
+        }
+        if($this->_types!=""){
+            $this->zipClass->addFromString('[Content_Types].xml', $this->_types);
+        }
 
         foreach ($this->tempDocumentFooters as $index => $xml) {
             $this->zipClass->addFromString($this->getFooterName($index), $xml);
@@ -421,6 +515,100 @@ class TemplateProcessor
         }
 
         return $this->tempDocumentFilename;
+    }
+
+    /**
+     * Replace a block with a picture.
+	 * Code from https://github.com/PHPOffice/PHPWord/issues/708
+     *
+     * @param string $strKey the string to replace
+     * @param array $img the informations about the image. Associative array : 'src' => 'path.png', 'size'=>array(0=>width, 1=>height)
+     *
+     * @return string
+     */
+    public function setImg( $strKey, $img){
+        $strKey = '${'.$strKey.'}';
+        $relationTmpl = '<Relationship Id="RID" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/IMG"/>';
+
+        $imgTmpl = '<w:pict><v:shape type="#_x0000_t75" style="width:WIDpx;height:HEIpx"><v:imagedata r:id="RID" o:title=""/></v:shape></w:pict>';
+
+        $toAdd = $toAddImg = $toAddType = '';
+        $aSearch = array('RID', 'IMG');
+        $aSearchType = array('IMG', 'EXT');
+        $countrels=$this->_countRels++;
+        //I'm work for jpg files, if you are working with other images types -> Write conditions here
+        $imgExt = 'jpg';
+        $imgName = 'img' . $countrels . '.' . $imgExt;
+
+        $this->zipClass->deleteName('word/media/' . $imgName);
+        $this->zipClass->addFile($img['src'], 'word/media/' . $imgName);
+
+        $typeTmpl = '<Override PartName="/word/media/'.$imgName.'" ContentType="image/EXT"/>';
+
+
+        $rid = 'rId' . $countrels;
+        $countrels++;
+        list($w,$h) = getimagesize($img['src']);
+
+        if(isset($img['swh'])) //Image proportionally larger side
+        {
+            if($w<=$h)
+            {
+                $ht=(int)$img['swh'];
+                $ot=$w/$h;
+                $wh=(int)$img['swh']*$ot;
+                $wh=round($wh);
+            }
+            if($w>=$h)
+            {
+                $wh=(int)$img['swh'];
+                $ot=$h/$w;
+                $ht=(int)$img['swh']*$ot;
+                $ht=round($ht);
+            }
+            $w=$wh;
+            $h=$ht;
+        }
+
+        if(isset($img['size']))
+        {
+            $w = $img['size'][0];
+            $h = $img['size'][1];
+        }
+
+
+        $toAddImg .= str_replace(array('RID', 'WID', 'HEI'), array($rid, $w, $h), $imgTmpl) ;
+        if(isset($img['dataImg']))
+        {
+            $toAddImg.='<w:br/><w:t>'.$this->limpiarString($img['dataImg']).'</w:t><w:br/>';
+        }
+
+        $aReplace = array($imgName, $imgExt);
+        $toAddType .= str_replace($aSearchType, $aReplace, $typeTmpl) ;
+
+        $aReplace = array($rid, $imgName);
+        $toAdd .= str_replace($aSearch, $aReplace, $relationTmpl);
+
+
+        $this->tempDocumentMainPart=str_replace('<w:t>' . $strKey . '</w:t>', $toAddImg, $this->tempDocumentMainPart);
+        //print $this->tempDocumentMainPart;
+
+        if($this->_rels=="")
+        {
+            $this->_rels=$this->zipClass->getFromName('word/_rels/document.xml.rels');
+            $this->_types=$this->zipClass->getFromName('[Content_Types].xml');
+        }
+
+        $this->_types       = str_replace('</Types>', $toAddType, $this->_types) . '</Types>';
+        $this->_rels        = str_replace('</Relationships>', $toAdd, $this->_rels) . '</Relationships>';
+    }
+
+    function limpiarString($str) {
+        return str_replace(
+            array('&', '<', '>', "\n"),
+            array('&amp;', '&lt;', '&gt;', "\n" . '<w:br/>'),
+            $str
+        );
     }
 
     /**
@@ -458,13 +646,17 @@ class TemplateProcessor
      */
     protected function fixBrokenMacros($documentPart)
     {
-        return preg_replace_callback(
-            '/\$(?:\{|[^{$]*\>\{)[^}$]*\}/U',
+        $fixedDocumentPart = $documentPart;
+
+        $fixedDocumentPart = preg_replace_callback(
+            '|\$[^{]*\{[^}]*\}|U',
             function ($match) {
                 return strip_tags($match[0]);
             },
-            $documentPart
+            $fixedDocumentPart
         );
+
+        return $fixedDocumentPart;
     }
 
     /**
@@ -515,19 +707,11 @@ class TemplateProcessor
     }
 
     /**
-     * Usually, the name of main part document will be 'document.xml'. However, some .docx files (possibly those from Office 365, experienced also on documents from Word Online created from blank templates) have file 'document22.xml' in their zip archive instead of 'document.xml'. This method searches content types file to correctly determine the file name.
-     *
      * @return string
      */
     protected function getMainPartName()
     {
-        $contentTypes = $this->zipClass->getFromName('[Content_Types].xml');
-
-        $pattern = '~PartName="\/(word\/document.*?\.xml)" ContentType="application\/vnd\.openxmlformats-officedocument\.wordprocessingml\.document\.main\+xml"~';
-
-        preg_match($pattern, $contentTypes, $matches);
-
-        return array_key_exists(1, $matches) ? $matches[1] : 'word/document.xml';
+        return 'word/document.xml';
     }
 
     /**
